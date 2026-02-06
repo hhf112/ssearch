@@ -16,22 +16,33 @@ class WorkerThreadsPool {
   WorkerThreadsPool &operator=(const WorkerThreadsPool &workers) = delete;
 
   inline int trySpawnThreads(unsigned int n = 1) {
-    killTrigger_ = false;
+    kill_trigger_ = false;
     try {
       while (n--) {
-        threadsVec_.emplace_back(std::thread([this]() -> void {
-          std::function<void()> pushTask;
+        threads_vec_.emplace_back(std::thread([this]() -> void {
+          std::function<void()> task;
+
+          active_thread_cnt_.fetch_add(1);
           while (true) {
-            std::unique_lock<std::mutex> take(taskVecMutex_);
+            std::unique_lock<std::mutex> take(task_vec_mutex_);
             cv_.wait(take,
-                     [this]() { return killTrigger_ || !taskVec_.empty(); });
-            if (killTrigger_) {
+                     [this]() { return kill_trigger_ || !task_vec_.empty(); });
+
+            if (kill_trigger_) {
+              active_thread_cnt_.fetch_sub(1);
+              cv_.notify_all();
               return;
             } else {
-              pushTask = std::move(taskVec_.front());
-              taskVec_.pop();
+              task = std::move(task_vec_.front());
+              task_vec_.pop();
+              take.unlock();
+
+              working_thread_cnt_.fetch_add(1);
+
+              task();
+
+              working_thread_cnt_.fetch_sub(1);
               cv_.notify_all();
-              pushTask();
             }
           }
         }));
@@ -46,11 +57,13 @@ class WorkerThreadsPool {
 
   template <typename Functor, typename... Args>
   inline void pushTask(Functor &&fn, Args &&...args) {
-    std::lock_guard<std::mutex> guard(taskVecMutex_);
+    std::lock_guard<std::mutex> guard(task_vec_mutex_);
+
     if constexpr (sizeof...(Args) != 0)
-      taskVec_.push(std::bind_front(std::forward(fn), std::forward(args)...));
+      task_vec_.push(std::bind_front(std::forward(fn), std::forward(args)...));
     else
-      taskVec_.push(fn);
+      task_vec_.push(fn);
+
     cv_.notify_one();
   }
 
@@ -61,38 +74,54 @@ class WorkerThreadsPool {
   }
 
   inline void enableKillTrigger() {
-    std::lock_guard<std::mutex> take(taskVecMutex_);
-    killTrigger_ = true;
+    std::lock_guard<std::mutex> take(task_vec_mutex_);
+    kill_trigger_.store(true);
     cv_.notify_all();
   }
 
-  inline void waitForQueueEmpty() {
-    std::unique_lock<std::mutex> take(taskVecMutex_);
-    cv_.wait(take, [this]() { return taskVec_.empty(); });
+  inline void waitForTasksComplete() {
+    std::unique_lock<std::mutex> take(task_vec_mutex_);
+    cv_.wait(take, [this]() { return working_thread_cnt_.load() == 0; });
   }
 
   inline void forceClearQueue() {
-    std::lock_guard<std::mutex> take(taskVecMutex_);
-    while (!taskVec_.empty()) taskVec_.pop();
+    std::lock_guard<std::mutex> take(task_vec_mutex_);
+    while (!task_vec_.empty()) task_vec_.pop();
   }
 
-  inline void waitForQueueEmptyAndHarvest() {
-    std::unique_lock<std::mutex> take(taskVecMutex_);
-    cv_.wait(take, [this]() { return taskVec_.empty() || killTrigger_; });
-    if (!killTrigger_) {
-      killTrigger_ = true;
+  inline void waitForTasksCompleteAndHarvest() {
+    // std::unique_lock<std::mutex> take(task_vec_mutex_);
+    // cv_.wait(take, [this]() { return task_vec_.empty() || kill_trigger_; });
+    // if (!kill_trigger_) {
+    //   kill_trigger_ = true;
+    //   cv_.notify_all();
+    // }
+    // take.unlock();
+    waitForTasksComplete();
+
+    {
+      std::lock_guard<std::mutex> take(task_vec_mutex_);
+      kill_trigger_.store(true);
       cv_.notify_all();
     }
-    take.unlock();
-    for (auto &worker : threadsVec_) worker.join();
+
+    std::unique_lock<std::mutex> take(task_vec_mutex_);
+    cv_.wait(take, [this] { return active_thread_cnt_ == 0; });
+    for (auto &worker : threads_vec_) worker.join();
   }
 
-  ~WorkerThreadsPool() { waitForQueueEmptyAndHarvest(); }
+  size_t getNumOfActiveThreads() {
+    return threads_vec_.size();
+  }
+
+  ~WorkerThreadsPool() { waitForTasksCompleteAndHarvest(); }
 
  private:
-  std::mutex taskVecMutex_;
+  std::mutex task_vec_mutex_;
   std::condition_variable cv_;
-  std::queue<std::function<void()>> taskVec_;
-  std::vector<std::thread> threadsVec_;
-  std::atomic<bool> killTrigger_ = false;
+  std::queue<std::function<void()>> task_vec_;
+  std::vector<std::thread> threads_vec_;
+  std::atomic<bool> kill_trigger_ = false;
+  std::atomic<int32_t> working_thread_cnt_ = 0;
+  std::atomic<int32_t> active_thread_cnt_ = 0;
 };

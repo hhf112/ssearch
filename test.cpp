@@ -5,18 +5,32 @@
 
 // 2688657
 int main(int argc, char* argv[]) {
+  if (argc < 2) {
+    std::cerr << "./test <file> <pattern>\n";
+    return 1;
+  }
+
   Ssearch search;
-  std::atomic<int> some = 0;
+  std::atomic<int> numSearched = 0;
   auto start = std::chrono::high_resolution_clock::now();
+
+  search.searchFile(argv[1], argv[2],
+              [&numSearched](Pos&& pos) -> void { ++numSearched; });
+
+    std::cerr << "sequential search found: " << numSearched << ", sequential search time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start) << '\n';
+
+
+
+  numSearched.store(0);
+  start = std::chrono::high_resolution_clock::now();
+
   search.threadedSearchFile(argv[1], "example",
-              [&some](Pos&& pos) -> void { ++some; }, 8);
-  std::cerr << some << '\n';
-  // std::string something = "this";
-  // std::cerr << search.threadedSearchText(something, "this", [](Pos&&
-  // Pos){std::cerr << "THIS" << '\n';}) <<'\n';
-  auto end = std::chrono::high_resolution_clock::now();
-  std::cerr << std::chrono::duration_cast<std::chrono::milliseconds>(end -
-                                                                     start)
-            << '\n';
+              [&numSearched](Pos&& pos) -> void { ++numSearched; }, 8);
+
+
+    std::cerr << "threaded search found: " << numSearched << ", threaded search time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start) << '\n';
+
+
+
   return 0;
 }
