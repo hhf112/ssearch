@@ -14,33 +14,33 @@
 class FileIterator {
  public:
   FileIterator(std::filesystem::path path) {
-    fileObject_ = std::fstream{path, std::ios::in};
-    goodFlag_ = fileObject_.good();
+    file_object_ = std::fstream{path, std::ios::in};
+    good_flag_ = file_object_.good();
   }
 
   int iterWithFunctor(std::function<int(const std::string &)> &&action,
                   size_t sz = 20 * MB, size_t lap = 0) {
     if (lap > sz) return INVALID_OVERLAP_LENGTH;
-    bufferString_.resize(sz + lap);
+    buffer_string_.resize(sz + lap);
 
     do {
       try {
-        fileObject_.read(bufferString_.data(), sz + lap);
+        file_object_.read(buffer_string_.data(), sz + lap);
       } catch (std::ios_base::failure &f) {
         return FILE_READ_FAIL;
       }
-      if (action(bufferString_) != CONTINUE_ITERATION) break;
-      fileObject_.seekg(-lap, std::ios_base::cur);
-    } while (fileObject_.gcount());
+      if (action(buffer_string_) != CONTINUE_ITERATION) break;
+      file_object_.seekg(-lap, std::ios_base::cur);
+    } while (file_object_.gcount());
 
-    goodFlag_ = fileObject_.good();
+    good_flag_ = file_object_.good();
     return OK;
   }
 
-  bool fileObjIsGood() { return goodFlag_; }
+  bool fileObjIsGood() { return good_flag_; }
 
  private:
-  std::fstream fileObject_;
-  std::string bufferString_;
-  bool goodFlag_ = false;
+  std::fstream file_object_;
+  std::string buffer_string_;
+  bool good_flag_ = false;
 };
