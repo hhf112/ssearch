@@ -15,10 +15,8 @@ class WorkerThreadsPool {
   WorkerThreadsPool(const WorkerThreadsPool &workers) = delete;
   WorkerThreadsPool &operator=(const WorkerThreadsPool &workers) = delete;
 
-  size_t getNumOfActiveThreads() { return threads_vec_.size(); }
-
   inline int trySpawnThreads(unsigned int n = 1) {
-    kill_trigger_ = false;
+    kill_all_threads_ = false;
     try {
       while (n--) {
         threads_vec_.emplace_back(std::thread([this]() -> void {
@@ -28,9 +26,9 @@ class WorkerThreadsPool {
           while (true) {
             std::unique_lock<std::mutex> take(task_queue_mutex_);
             cv_.wait(take,
-                     [this]() { return kill_trigger_ || !task_queue_.empty(); });
+                     [this]() { return kill_all_threads_ || !task_queue_.empty(); });
 
-            if (kill_trigger_) {
+            if (kill_all_threads_) {
               active_thread_cnt_.fetch_sub(1);
               cv_.notify_all();
               return;
@@ -75,9 +73,9 @@ class WorkerThreadsPool {
     return obj;
   }
 
-  inline void enableKillTrigger() {
+  inline void enableKillAllThreads() {
     std::lock_guard<std::mutex> take(task_queue_mutex_);
-    kill_trigger_.store(true);
+    kill_all_threads_.store(true);
     cv_.notify_all();
   }
 
@@ -96,7 +94,7 @@ class WorkerThreadsPool {
 
     {
       std::lock_guard<std::mutex> take(task_queue_mutex_);
-      kill_trigger_.store(true);
+      kill_all_threads_.store(true);
       cv_.notify_all();
     }
 
@@ -118,8 +116,7 @@ class WorkerThreadsPool {
   std::condition_variable cv_;
   std::queue<std::function<void()>> task_queue_;
   std::vector<std::thread> threads_vec_;
-  std::atomic<bool> kill_trigger_ = false;
+  std::atomic<bool> kill_all_threads_ = false;
   std::atomic<int32_t> working_thread_cnt_ = 0;
   std::atomic<int32_t> active_thread_cnt_ = 0;
 };
-

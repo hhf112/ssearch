@@ -23,10 +23,8 @@ class WorkerThreadsPool {
   WorkerThreadsPool(const WorkerThreadsPool &workers) = delete;
   WorkerThreadsPool &operator=(const WorkerThreadsPool &workers) = delete;
 
-  size_t getNumOfActiveThreads() { return threads_vec_.size(); }
-
   inline int trySpawnThreads(unsigned int n = 1) {
-    kill_trigger_ = false;
+    kill_all_threads_ = false;
     try {
       while (n--) {
         threads_vec_.emplace_back(std::thread([this]() -> void {
@@ -36,9 +34,9 @@ class WorkerThreadsPool {
           while (true) {
             std::unique_lock<std::mutex> take(task_queue_mutex_);
             cv_.wait(take,
-                     [this]() { return kill_trigger_ || !task_queue_.empty(); });
+                     [this]() { return kill_all_threads_ || !task_queue_.empty(); });
 
-            if (kill_trigger_) {
+            if (kill_all_threads_) {
               active_thread_cnt_.fetch_sub(1);
               cv_.notify_all();
               return;
@@ -83,9 +81,9 @@ class WorkerThreadsPool {
     return obj;
   }
 
-  inline void enableKillTrigger() {
+  inline void enableKillAllThreads() {
     std::lock_guard<std::mutex> take(task_queue_mutex_);
-    kill_trigger_.store(true);
+    kill_all_threads_.store(true);
     cv_.notify_all();
   }
 
@@ -104,7 +102,7 @@ class WorkerThreadsPool {
 
     {
       std::lock_guard<std::mutex> take(task_queue_mutex_);
-      kill_trigger_.store(true);
+      kill_all_threads_.store(true);
       cv_.notify_all();
     }
 
@@ -126,7 +124,7 @@ class WorkerThreadsPool {
   std::condition_variable cv_;
   std::queue<std::function<void()>> task_queue_;
   std::vector<std::thread> threads_vec_;
-  std::atomic<bool> kill_trigger_ = false;
+  std::atomic<bool> kill_all_threads_ = false;
   std::atomic<int32_t> working_thread_cnt_ = 0;
   std::atomic<int32_t> active_thread_cnt_ = 0;
 };
@@ -190,7 +188,7 @@ class PatternCacheResolvr {
   /*@brief fetch from or create in preprocessed pattern PatternCacheObj*/
   inline const PatternCacheObj &queryPatternCache(int nchars,
                                                   const std::string &str) {
-    if (page_.count(str)) return page_[str];
+    if (cache_resolvr_.count(str)) return cache_resolvr_[str];
 
     int n = str.length();
     PatternCacheObj data(nchars, str.length());
@@ -198,7 +196,7 @@ class PatternCacheResolvr {
     ssuffix(data.shift, data.bpos, str, n);
     case1(data.shift, data.bpos, str, n);
 
-    auto [newData, _] = page_.emplace(str, std::move(data));
+    auto [newData, _] = cache_resolvr_.emplace(str, std::move(data));
     return newData->second;
   }
 
@@ -240,7 +238,7 @@ class PatternCacheResolvr {
     }
   }
 
-  std::map<std::string, PatternCacheObj> page_;
+  std::map<std::string, PatternCacheObj> cache_resolvr_;
 };
 
 #define MIN_CHARS_PER_THREAD 2 * MB
@@ -326,7 +324,7 @@ class Ssearch {
                         const std::function<void(Pos &&pos)> &action,
                         int nchars = 256) {
     size_t cnt = 0;
-    const PatternCacheObj &data = page_.queryPatternCache(nchars, pattern);
+    const PatternCacheObj &data = cache_resolvr_.queryPatternCache(nchars, pattern);
     std::ptrdiff_t m = pattern.length(), n = text.length(),
                    s = startPos - text.begin(), en = endPos - text.begin(), j,
                    shift_gsfx, shift_bchr;
@@ -354,5 +352,5 @@ class Ssearch {
   }
 
  private:
-  PatternCacheResolvr page_;
+  PatternCacheResolvr cache_resolvr_;
 };
