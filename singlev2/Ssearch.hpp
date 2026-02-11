@@ -17,6 +17,7 @@
 #define THREAD_SPAWN_FAIL 2
 #define OK 0
 
+namespace util {
 class WorkerThreadsPool {
  public:
   WorkerThreadsPool() = default;
@@ -33,8 +34,9 @@ class WorkerThreadsPool {
 
           while (true) {
             std::unique_lock<std::mutex> take(task_queue_mutex_);
-            cv_.wait(take,
-                     [this]() { return kill_all_threads_ || !task_queue_.empty(); });
+            cv_.wait(take, [this]() {
+              return kill_all_threads_ || !task_queue_.empty();
+            });
 
             if (kill_all_threads_) {
               active_thread_cnt_.fetch_sub(1);
@@ -68,7 +70,8 @@ class WorkerThreadsPool {
     std::lock_guard<std::mutex> guard(task_queue_mutex_);
 
     if constexpr (sizeof...(Args) != 0)
-      task_queue_.push(std::bind_front(std::forward(fn), std::forward(args)...));
+      task_queue_.push(
+          std::bind_front(std::forward(fn), std::forward(args)...));
     else
       task_queue_.push(fn);
 
@@ -89,7 +92,9 @@ class WorkerThreadsPool {
 
   inline void waitForTasksComplete() {
     std::unique_lock<std::mutex> take(task_queue_mutex_);
-    cv_.wait(take, [this]() { return working_thread_cnt_.load() == 0 && task_queue_.size() == 0; });
+    cv_.wait(take, [this]() {
+      return working_thread_cnt_.load() == 0 && task_queue_.size() == 0;
+    });
   }
 
   inline void forceClearQueue() {
@@ -112,10 +117,10 @@ class WorkerThreadsPool {
   }
 
   ~WorkerThreadsPool() { waitForTasksCompleteAndHarvest(); }
-  int32_t getWorkingThreadsCnt() { return working_thread_cnt_.load();}
-  int32_t getActiveThreadsCnt() { return active_thread_cnt_.load();}
-  int32_t getNumTasksRemaining() { 
-    std::lock_guard<std::mutex> take (task_queue_mutex_);
+  int32_t getWorkingThreadsCnt() { return working_thread_cnt_.load(); }
+  int32_t getActiveThreadsCnt() { return active_thread_cnt_.load(); }
+  int32_t getNumTasksRemaining() {
+    std::lock_guard<std::mutex> take(task_queue_mutex_);
     return task_queue_.size();
   }
 
@@ -142,7 +147,7 @@ class FileIterator {
   }
 
   int iterWithFunctor(std::function<int(const std::string &)> &&action,
-                  size_t sz = 20 * MB, size_t lap = 0) {
+                      size_t sz = 20 * MB, size_t lap = 0) {
     if (lap > sz) return INVALID_OVERLAP_LENGTH;
     buffer_string_.resize(sz + lap);
 
@@ -167,7 +172,10 @@ class FileIterator {
   std::string buffer_string_;
   bool good_flag_ = false;
 };
+}  // namespace util
 
+
+namespace ssearch {
 struct PatternCacheObj {
   std::vector<size_t> shift, bpos;
   std::vector<ptrdiff_t> badchars;
@@ -185,16 +193,15 @@ class PatternCacheResolvr {
  public:
   PatternCacheResolvr() = default;
 
-  /*@brief fetch from or create in preprocessed pattern PatternCacheObj*/
   inline const PatternCacheObj &queryPatternCache(int nchars,
                                                   const std::string &str) {
     if (cache_resolvr_.count(str)) return cache_resolvr_[str];
 
     int n = str.length();
     PatternCacheObj data(nchars, str.length());
-    badchh(data.badchars, str, n);
-    ssuffix(data.shift, data.bpos, str, n);
-    case1(data.shift, data.bpos, str, n);
+    fillBadChar(data.badchars, str, n);
+    strongSuffix(data.shift, data.bpos, str, n);
+    specialCase(data.shift, data.bpos, str, n);
 
     auto [newData, _] = cache_resolvr_.emplace(str, std::move(data));
     return newData->second;
@@ -203,7 +210,7 @@ class PatternCacheResolvr {
  private:
   /*@src
    * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-for-pattern-searchTexting*/
-  inline void badchh(std::vector<ptrdiff_t> &badhcars, const std::string &str,
+  inline void fillBadChar(std::vector<ptrdiff_t> &badhcars, const std::string &str,
                      size_t size) {
     size_t i;
     for (i = 0; i < size; i++) badhcars[(int)str[i]] = i;
@@ -211,7 +218,7 @@ class PatternCacheResolvr {
 
   /*@src
    * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-good-suffix-heuristic*/
-  inline void ssuffix(std::vector<size_t> &shift, std::vector<size_t> &bpos,
+  inline void strongSuffix(std::vector<size_t> &shift, std::vector<size_t> &bpos,
                       const std::string &pat, size_t m) {
     size_t i, j;
     j = bpos[0];
@@ -223,7 +230,7 @@ class PatternCacheResolvr {
 
   /*@src
    * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-good-suffix-heuristic*/
-  inline void case1(std::vector<size_t> &shift, std::vector<size_t> &bpos,
+  inline void specialCase(std::vector<size_t> &shift, std::vector<size_t> &bpos,
                     const std::string &pat, size_t m) {
     ptrdiff_t i = static_cast<ptrdiff_t>(m), j = static_cast<ptrdiff_t>(m + 1);
     bpos[i] = j;
@@ -248,16 +255,16 @@ struct Pos {
   std::string::const_iterator patternIt;
 };
 
-class Ssearch {
+class SE {
  public:
   inline int threadedSearchFile(const std::filesystem::path &path,
                                 const std::string &pattern,
                                 const std::function<void(Pos &&pos)> &action,
                                 unsigned int threads = 1, int nchars = 256) {
-    FileIterator reader{path};
+    util::FileIterator reader{path};
     if (!reader.fileObjIsGood()) return FILE_READ_FAIL;
 
-    auto workers = WorkerThreadsPool::makeSharedPtrTo(threads);
+    auto workers = util::WorkerThreadsPool::makeSharedPtrTo(threads);
     if (!workers) return THREAD_SPAWN_FAIL;
 
 #define DEFAULT_FNONSEQ                                                 \
@@ -274,7 +281,7 @@ class Ssearch {
                         const std::string &pattern,
                         const std::function<void(Pos &&pos)> &action,
                         int nchars = 256) {
-    FileIterator reader{path};
+    util::FileIterator reader{path};
     if (!reader.fileObjIsGood()) return FILE_READ_FAIL;
 
 #define DEFAULT_FSEQ                                                  \
@@ -290,22 +297,22 @@ class Ssearch {
       const std::string &text, const std::string &pattern,
       const std::function<void(Pos &&pos)> &action, int nchars = 256,
       unsigned int threads = 1,
-      std::shared_ptr<WorkerThreadsPool> thread_pool_obj = NULL) {
+      std::shared_ptr<util::WorkerThreadsPool> thread_pool_obj = NULL) {
     std::atomic<size_t> cnt = 0;
     const std::ptrdiff_t lap = pattern.length() - 1;
 
-    std::shared_ptr<WorkerThreadsPool> workers;
+    std::shared_ptr<util::WorkerThreadsPool> workers;
     if (thread_pool_obj)
       workers = thread_pool_obj;
     else {
-      workers = WorkerThreadsPool::makeSharedPtrTo(threads);
+      workers = util::WorkerThreadsPool::makeSharedPtrTo(threads);
       if (!workers) return THREAD_SPAWN_FAIL;
     }
 
     for (std::string::const_iterator
              start_pos = text.begin(),
              end_pos = std::min(text.end(),
-                               text.begin() + MIN_CHARS_PER_THREAD + lap);
+                                text.begin() + MIN_CHARS_PER_THREAD + lap);
          end_pos <= text.end(); start_pos += MIN_CHARS_PER_THREAD,
              end_pos += MIN_CHARS_PER_THREAD + lap) {
       workers->pushTask([&, start_pos, end_pos]() {
@@ -324,7 +331,8 @@ class Ssearch {
                         const std::function<void(Pos &&pos)> &action,
                         int nchars = 256) {
     size_t cnt = 0;
-    const PatternCacheObj &data = cache_resolvr_.queryPatternCache(nchars, pattern);
+    const PatternCacheObj &data =
+        cache_resolvr_.queryPatternCache(nchars, pattern);
     std::ptrdiff_t m = pattern.length(), n = text.length(),
                    s = start_pos - text.begin(), en = end_pos - text.begin(), j,
                    shift_gsfx, shift_bchr;
@@ -354,3 +362,4 @@ class Ssearch {
  private:
   PatternCacheResolvr cache_resolvr_;
 };
+}  // namespace ssearch
