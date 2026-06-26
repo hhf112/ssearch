@@ -48,7 +48,7 @@ TEST(ssearch_test, searchFile) {
 	ssearch::SE search;
 	int32_t cnt = 0;
 	search.searchFile(
-		"/home/hrsh/dev/ssearch/100mb.txt", "example",
+		"../100mb-example-file.txt", "example",
 		[&cnt](ssearch::Pos &&pos) { ++cnt; }, 8 * MB);
 	ASSERT_EQ(cnt >= 2'688'657, true);
 }
@@ -57,7 +57,7 @@ TEST(ssearch_test, threadedSearchFile) {
 	ssearch::SE search;
 	std::atomic<int32_t> cnt = 0;
 	search.threadedSearchFile(
-		"/home/hrsh/dev/ssearch/100mb.txt", "example",
+		"../100mb-example-file.txt", "example",
 		[&cnt](ssearch::Pos &&pos) { ++cnt; }, 12, 4*MB);
 	ASSERT_EQ(cnt >= 2'688'657, true);
 }

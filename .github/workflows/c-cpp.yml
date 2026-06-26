@@ -23,5 +23,7 @@ jobs:
       - name: Build
         run: cmake --build build/
 
+      - name: Prepare test data
+        run: yes "this is an example text" | head -c 100M > 100mb-example-file.txt
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
