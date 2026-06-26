@@ -28,3 +28,6 @@ target_link_libraries(
 include(GoogleTest)
 gtest_discover_tests(ssearch_test.out)
 
+
+# add_test(NAME ssearch_test COMMAND ssearch_test.out)
+# set_tests_properties(ssearch_test PROPERTIES TIMEOUT 5)

@@ -1,11 +1,13 @@
 #include <climits>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -137,15 +139,20 @@ class BlockingThreadPool {
 			cv_.notify_all();
 
 			cv_.wait(task_q_lock, [this] { return active_thread_cnt_ == 0; });
-			// DEBUG("forceterminateThreads(): wait completed, " << active_thread_cnt_ << " active threads.\n must join " << threads_vec_.size() << " threads.\n");
+			// DEBUG("forceterminateThreads(): wait completed, " <<
+			// active_thread_cnt_ << " active threads.\n must join " <<
+			// threads_vec_.size() << " threads.\n");
 
 			for (auto &worker : threads_vec_) {
 				if (worker.joinable()) {
-					// DEBUG("forceterminateThreads(): " << "joining a thread.\n");
+					// DEBUG("forceterminateThreads(): " << "joining a
+					// thread.\n");
 					worker.join();
 					joinable_thread_cnt_.fetch_sub(1);
-					// DEBUG("forceterminateThreads(): " << joinable_thread_cnt_ << " threads remaining to join.\n");
-				} // else DEBUG("forceterminateThreads(): " << "encountered an unjoinable thread.\n");
+					// DEBUG("forceterminateThreads(): " << joinable_thread_cnt_
+					// << " threads remaining to join.\n");
+				} // else DEBUG("forceterminateThreads(): " << "encountered an
+				  // unjoinable thread.\n");
 			}
 			threads_vec_.clear();
 			// DEBUG("forceterminateThreads(): threads harvested\n");
@@ -190,233 +197,262 @@ class BlockingThreadPool {
 	std::atomic<int32_t> joinable_thread_cnt_ = 0;
 };
 
-#define MB 1048576
-#define CONTINUE_ITERATION 0
-#define INVALID_OVERLAP_LENGTH -1
-#define FILE_READ_FAIL -2
+class FileChunker {
+#define READ_NEXT 0
+#define INVALID_OVERLAP -1
+#define READ_FAIL 2
 
-class FileIterator {
- public:
-  FileIterator(std::filesystem::path path) {
-    file_object_ = std::fstream{path, std::ios::in};
-    good_flag_ = file_object_.good();
-  }
+  public:
+	FileChunker(std::filesystem::path path) { file_obj_ = std::ifstream(path); }
 
-  int iterWithFunctor(std::function<int(const std::string &)> &&action,
-                      size_t sz = 20 * MB, size_t lap = 0) {
-    if (lap > sz) return INVALID_OVERLAP_LENGTH;
-    buffer_string_.resize(sz + lap);
+	uint8_t runCallbackPerChunk(
+		std::function<uint8_t(const std::list<std::string>::iterator it)>
+			&&callback,
+		const size_t chunk_size, const size_t overlap) {
+		if (overlap >= chunk_size)
+			return INVALID_OVERLAP;
 
-    do {
-      try {
-        file_object_.read(buffer_string_.data(), sz + lap);
-      } catch (std::ios_base::failure &f) {
-        return FILE_READ_FAIL;
-      }
-      if (action(buffer_string_) != CONTINUE_ITERATION) break;
-      file_object_.seekg(-lap, std::ios_base::cur);
-    } while (file_object_.gcount());
+		do {
+			buf_list_.insert(buf_list_.begin(), std::string());
+			auto buf_it = buf_list_.begin();
+			buf_it->resize(chunk_size + overlap);
 
-    good_flag_ = file_object_.good();
-    return OK;
-  }
+			try {
+				file_obj_.read(buf_it->data(), buf_it->length());
+			} catch (std::ios_base::failure &f) {
+				return READ_FAIL;
+			}
+			if (callback(buf_it) != READ_NEXT)
+				break;
+			if (file_obj_.eof())
+				break;
+			file_obj_.seekg(-overlap, std::ios_base::cur);
+		} while (file_obj_.gcount());
 
-  bool fileObjIsGood() { return good_flag_; }
+		return OK;
+	}
 
- private:
-  std::fstream file_object_;
-  std::string buffer_string_;
-  bool good_flag_ = false;
+	explicit operator bool() const { return file_obj_.good(); }
+
+	bool isReadable() { return file_obj_.good(); }
+	void eraseBuf(const std::list<std::string>::iterator it) {
+		buf_list_.erase(it);
+	}
+
+  private:
+	std::ifstream file_obj_;
+	std::list<std::string> buf_list_;
 };
-}  // namespace util
+} // namespace util
 
 namespace ssearch {
-struct PatternCacheObj {
-  std::vector<size_t> shift, bpos;
-  std::vector<ptrdiff_t> badchars;
-  int NCHARS;
+struct PatternData {
+	std::vector<size_t> shift, bpos;
+	std::vector<ptrdiff_t> badchars;
+	int num_chars;
 
-  PatternCacheObj() = default;
-  PatternCacheObj(int nchars, size_t patternlen) : NCHARS{nchars} {
-    shift.resize(patternlen + 1);
-    bpos.resize(patternlen + 1);
-    badchars.resize(nchars, -1);
-  }
+	PatternData() = default;
+	PatternData(int nchars, size_t pat_len) : num_chars{nchars} {
+		shift.resize(pat_len + 1);
+		bpos.resize(pat_len + 1);
+		badchars.resize(nchars, -1);
+	}
 };
 
-class PatternCacheResolvr {
- public:
-  PatternCacheResolvr() = default;
+class PatternDataFactory {
+  public:
+	PatternDataFactory() = default;
 
-  inline const PatternCacheObj &queryPatternCache(int nchars,
-                                                  const std::string &str) {
-    if (cache_resolvr_.count(str)) return cache_resolvr_[str];
+	inline const PatternData &getPatternData(int num_chars,
+											 const std::string_view str) {
+		if (data_map_.count(str))
+			return data_map_[str];
 
-    int n = str.length();
-    PatternCacheObj data(nchars, str.length());
-    fillBadChar(data.badchars, str);
-    strongSuffix(data.shift, data.bpos, str, n);
-    specialCase(data.shift, data.bpos, str, n);
+		int n = str.length();
+		PatternData data(num_chars, str.length());
+		fillBadChar(data.badchars, str);
+		strongSuffix(data.shift, data.bpos, str, n);
+		specialCase(data.shift, data.bpos, str, n);
 
-    auto [newData, _] = cache_resolvr_.emplace(str, std::move(data));
-    return newData->second;
-  }
+		auto [newData, _] = data_map_.emplace(str, std::move(data));
+		return newData->second;
+	}
 
- private:
-  inline void fillBadChar(std::vector<ptrdiff_t> &badhcars,
-                          const std::string &str) {
-    size_t max_idx = str.size();
-    for (size_t char_idx = 0; char_idx < max_idx; char_idx++)
-      badhcars[(int8_t)str[char_idx]] = char_idx;
-  }
+  private:
+	inline void fillBadChar(std::vector<ptrdiff_t> &badhcars,
+							const std::string_view str) {
+		size_t max_idx = str.size();
+		for (size_t char_idx = 0; char_idx < max_idx; char_idx++)
+			badhcars[(int8_t)str[char_idx]] = char_idx;
+	}
 
-  /*@src
-   * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-good-suffix-heuristic*/
-  inline void strongSuffix(std::vector<size_t> &shift,
-                           std::vector<size_t> &bpos, const std::string &pat,
-                           size_t m) {
-    size_t i, j;
-    j = bpos[0];
-    for (i = 0; i <= m; i++) {
-      if (shift[i] == m) shift[i] = j;
-      if (i == j) j = bpos[j];
-    }
-  }
+	/*@src
+	 * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-good-suffix-heuristic*/
+	inline void strongSuffix(std::vector<size_t> &shift,
+							 std::vector<size_t> &bpos,
+							 const std::string_view pat, size_t m) {
+		size_t i, j;
+		j = bpos[0];
+		for (i = 0; i <= m; i++) {
+			if (shift[i] == m)
+				shift[i] = j;
+			if (i == j)
+				j = bpos[j];
+		}
+	}
 
-  /*@src
-   * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-good-suffix-heuristic*/
-  inline void specialCase(std::vector<size_t> &shift, std::vector<size_t> &bpos,
-                          const std::string &pat, size_t m) {
-    ptrdiff_t i = static_cast<ptrdiff_t>(m), j = static_cast<ptrdiff_t>(m + 1);
-    bpos[i] = j;
-    while (i > 0) {
-      while (j <= m && pat[i - 1] != pat[j - 1]) {
-        if (shift[j] == m) shift[j] = j - i;
-        j = bpos[j];
-      }
-      i--;
-      j--;
-      bpos[i] = j;
-    }
-  }
+	/*@src
+	 * https://www.geeksforgeeks.org/dsa/boyer-moore-algorithm-good-suffix-heuristic*/
+	inline void specialCase(std::vector<size_t> &shift,
+							std::vector<size_t> &bpos,
+							const std::string_view pat, size_t m) {
+		ptrdiff_t i = static_cast<ptrdiff_t>(m),
+				  j = static_cast<ptrdiff_t>(m + 1);
+		bpos[i] = j;
+		while (i > 0) {
+			while (j <= m && pat[i - 1] != pat[j - 1]) {
+				if (shift[j] == m)
+					shift[j] = j - i;
+				j = bpos[j];
+			}
+			i--;
+			j--;
+			bpos[i] = j;
+		}
+	}
 
-  std::map<std::string, PatternCacheObj> cache_resolvr_;
+	std::map<const std::string_view, PatternData> data_map_;
 };
 
-#define MIN_CHARS_PER_THREAD 2 * MB
 struct Pos {
-  std::string::const_iterator beginIt;
-  std::string::const_iterator endIt;
-  std::string::const_iterator patternIt;
+	std::string::const_iterator begin;
+	std::string::const_iterator end;
+	std::string::const_iterator pattern;
 };
 
 class SE {
- public:
-  inline int threadedSearchFile(const std::filesystem::path &path,
-                                const std::string &pattern,
-                                const std::function<void(Pos &&pos)> &action,
-                                unsigned int threads_cnt = 1,
-                                int nchars = 256) {
-    util::FileIterator reader{path};
-    if (!reader.fileObjIsGood()) return FILE_READ_FAIL;
+  public:
+	inline int threadedSearchFile(
+		const std::filesystem::path &path, const std::string_view pattern,
+		const std::function<void(Pos &&pos)> &callback,
+		unsigned int cnt_threads, size_t chunk_size, int num_chars = 256) {
+		util::FileChunker reader{path};
+		if (!reader.isReadable())
+			return READ_FAIL;
 
-    auto workers = util::BlockingThreadPool::makeSharedPtrTo(threads_cnt);
-    if (!workers) return SYS_ERR;
+		auto workers = util::BlockingThreadPool::makeSharedPtrTo(cnt_threads);
+		if (!workers)
+			return SYS_ERR;
 
-#define FUNC_DEFAULT_SEARCH_NONSEQ                                          \
-  [&pattern, &action, nchars, threads_cnt, workers,                         \
-   this](const std::string &buf) mutable -> int {                           \
-    threadedSearchText(buf, pattern, action, nchars, threads_cnt, workers); \
-    return CONTINUE_ITERATION;                                              \
-  }
-    int status = reader.iterWithFunctor(FUNC_DEFAULT_SEARCH_NONSEQ);
-    return status;
-  }
+		int status = reader.runCallbackPerChunk(
+			[pattern, &callback, num_chars, cnt_threads, workers, &reader,
+			 this](
+				const std::list<std::string>::iterator buf_it) mutable -> int {
+				workers->pushTask([pattern, &callback, num_chars, cnt_threads,
+								   workers, &reader, buf_it, this]() mutable {
+					searchText(buf_it->begin(), buf_it->end(), pattern,
+							   callback, num_chars);
+					reader.eraseBuf(buf_it);
+				});
+				return READ_NEXT;
+			},
+			chunk_size, pattern.length() - 1);
 
-  inline int searchFile(const std::filesystem::path &path,
-                        const std::string &pattern,
-                        const std::function<void(Pos &&pos)> &action,
-                        int nchars = 256) {
-    util::FileIterator reader{path};
-    if (!reader.fileObjIsGood()) return FILE_READ_FAIL;
+		workers->waitForTasksComplete();
+		return status;
+	}
 
-#define DEFAULT_FSEQ                                                  \
-  [&](const std::string &buf) -> int {                                \
-    searchText(buf, pattern, buf.begin(), buf.end(), action, nchars); \
-    return CONTINUE_ITERATION;                                        \
-  }
+	inline int searchFile(const std::filesystem::path &path,
+						  const std::string_view pattern,
+						  const std::function<void(Pos &&pos)> &callback,
+						  size_t chunk_size, int nchars = 256) {
+		util::FileChunker reader{path};
+		if (!reader.isReadable())
+			return READ_FAIL;
 
-    return reader.iterWithFunctor(DEFAULT_FSEQ);
-  }
+		return reader.runCallbackPerChunk(
+			[&](const std::list<std::string>::iterator buf) -> int {
+				searchText(buf->begin(), buf->end(), pattern, callback, nchars);
+				return READ_NEXT;
+			},
+			chunk_size, pattern.length() - 1);
+	}
 
-  inline int threadedSearchText(
-      const std::string &text, const std::string &pattern,
-      const std::function<void(Pos &&pos)> &action, int nchars = 256,
-      unsigned int threads_cnt = 1,
-      std::shared_ptr<util::BlockingThreadPool> thread_pool_obj = NULL) {
-    std::atomic<size_t> cnt = 0;
-    const std::ptrdiff_t char_overlap = pattern.length() - 1;
+	inline int threadedSearchText(
+		const std::string::const_iterator begin,
+		std::string::const_iterator end, const std::string_view pattern,
+		const std::function<void(Pos &&pos)> &callback,
+		unsigned int cnt_threads, size_t part_size,
+		std::shared_ptr<util::BlockingThreadPool> thread_pool = NULL,
+		int num_chars = 256) {
+		std::atomic<size_t> cnt = 0;
+		const std::ptrdiff_t overlap = pattern.length() - 1;
 
-    std::shared_ptr<util::BlockingThreadPool> workers;
-    if (thread_pool_obj)
-      workers = thread_pool_obj;
-    else {
-      workers = util::BlockingThreadPool::makeSharedPtrTo(threads_cnt);
-      if (!workers) return SYS_ERR;
-    }
+		std::shared_ptr<util::BlockingThreadPool> workers;
+		if (thread_pool)
+			workers = thread_pool;
+		else {
+			workers = util::BlockingThreadPool::makeSharedPtrTo(cnt_threads);
+			if (!workers)
+				return SYS_ERR;
+		}
 
-    for (std::string::const_iterator
-             start_pos = text.begin(),
-             end_pos =
-                 std::min(text.end(),
-                          text.begin() + MIN_CHARS_PER_THREAD + char_overlap);
-         end_pos <= text.end(); start_pos += MIN_CHARS_PER_THREAD,
-             end_pos += MIN_CHARS_PER_THREAD + char_overlap) {
-      workers->pushTask([&, start_pos, end_pos]() {
-        cnt.fetch_add(
-            searchText(text, pattern, start_pos, end_pos, action, nchars));
-      });
-    }
+		for (std::string::const_iterator
+				 first = begin,
+				 second = std::min(end, begin + part_size + overlap);
+			 second <= end; first += part_size, second += part_size + overlap) {
+			workers->pushTask([&, first, second]() {
+				cnt.fetch_add(
+					searchText(first, second, pattern, callback, num_chars));
+			});
+		}
 
-    workers->waitForTasksComplete();
-    return cnt;
-  }
+		workers->waitForTasksComplete();
+		return cnt;
+	}
 
-  inline int searchText(const std::string &text, const std::string &pattern,
-                        std::string::const_iterator start_pos,
-                        std::string::const_iterator end_pos,
-                        const std::function<void(Pos &&pos)> &action,
-                        int nchars = 256) {
-    size_t cnt = 0;
-    const PatternCacheObj &data =
-        cache_resolvr_.queryPatternCache(nchars, pattern);
-    std::ptrdiff_t m = pattern.length(), n = text.length(),
-                   s = start_pos - text.begin(), en = end_pos - text.begin(), j,
-                   shift_gsfx, shift_bchr;
-    while (s <= en - m) {
-      j = m - 1;
-      while (j >= 0 && pattern[j] == text[s + j]) --j;
+	inline int searchText(std::string::const_iterator begin,
+						  std::string::const_iterator end,
+						  const std::string_view pattern,
+						  const std::function<void(Pos &&pos)> &action,
+						  int num_chars = 256) {
+		size_t cnt = 0;
+		const PatternData &data =
+			pat_data_factory_.getPatternData(num_chars, pattern);
 
-      if (j < 0) {
-        action(Pos{.beginIt = text.begin(),
-                   .endIt = text.end(),
-                   .patternIt = text.begin() + s});
-        ++cnt;
-        shift_bchr = (s + m < en) ? m - data.badchars[text[s + m]]
-                                  : static_cast<std::ptrdiff_t>(1);
-        shift_gsfx = data.shift[0];
-      } else {
-        shift_gsfx = data.shift[j + 1];
-        shift_bchr = std::max(static_cast<std::ptrdiff_t>(1),
-                              j - data.badchars[text[s + j]]);
-      }
+		std::ptrdiff_t m = pattern.length(), n = end - begin, j, shift_gsfx,
+					   shift_bchr;
 
-      s += std::max(shift_gsfx, shift_bchr);
-    }
-    return cnt;
-  }
+		if (n < m || m == 0) {
+			return 0;
+		}
 
- private:
-  PatternCacheResolvr cache_resolvr_;
+		std::string::const_iterator s = begin, en = end;
+		while (s <= (en - m)) {
+			j = m - 1;
+
+			while (j >= 0 && pattern[j] == *(s + j))
+				--j;
+
+			if (j < 0) {
+				action(Pos{.begin = begin, .end = end, .pattern = s});
+				++cnt;
+				shift_bchr = (s + m < en) ? m - data.badchars[*(s + m)]
+										  : static_cast<std::ptrdiff_t>(1);
+				shift_gsfx = data.shift[0];
+			} else {
+				shift_gsfx = data.shift[j + 1];
+
+				shift_bchr = std::max(static_cast<std::ptrdiff_t>(1),
+									  j - data.badchars[*(s + j)]);
+			}
+
+			s += std::max(shift_gsfx, shift_bchr);
+		}
+		return cnt;
+	}
+
+  private:
+	PatternDataFactory pat_data_factory_;
 };
-}  // namespace ssearch
+} // namespace ssearch
