@@ -1,7 +1,7 @@
 #include "../ssearch.hpp"
 #include <gtest/gtest.h>
 
-#define MB 1000000
+#define MB 1024*1024
 
 TEST(ssearch_test, searchText) {
 	ssearch::SE search;
@@ -47,17 +47,22 @@ TEST(ssearch_test, threadedSearchText) {
 TEST(ssearch_test, searchFile) {
 	ssearch::SE search;
 	int32_t cnt = 0;
-	search.searchFile(
-		"../100mb-example-file.txt", "example",
-		[&cnt](ssearch::Pos &&pos) { ++cnt; }, 8 * MB);
-	ASSERT_EQ(cnt >= 2'688'657, true);
+	ASSERT_EQ(search.searchFile(
+				  "../100mb-example-file.txt", "example",
+				  [&cnt](ssearch::Pos &&pos) { ++cnt; }, 2 * MB),
+			  OK);
+	std::cerr << cnt << '\n';
+	ASSERT_EQ(cnt >= 4'369'066, true); // exact.
+	std::cerr << "cnt = " << cnt << '\n';
 }
 
 TEST(ssearch_test, threadedSearchFile) {
 	ssearch::SE search;
 	std::atomic<int32_t> cnt = 0;
-	search.threadedSearchFile(
-		"../100mb-example-file.txt", "example",
-		[&cnt](ssearch::Pos &&pos) { ++cnt; }, 12, 4*MB);
-	ASSERT_EQ(cnt >= 2'688'657, true);
+	ASSERT_EQ(search.threadedSearchFile(
+				  "../100mb-example-file.txt", "example",
+				  [&cnt](ssearch::Pos &&pos) { ++cnt; }, 8, 2 * MB),
+			  OK);
+	ASSERT_EQ(cnt >= 4'369'066, true);
+	std::cerr << "cnt = " << cnt << '\n';
 }

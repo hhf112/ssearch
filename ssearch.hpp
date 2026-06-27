@@ -1,4 +1,5 @@
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -6,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iostream>
 #include <list>
 #include <map>
@@ -203,44 +205,51 @@ class FileChunker {
 #define READ_FAIL 2
 
   public:
-	FileChunker(std::filesystem::path path) { file_obj_ = std::ifstream(path); }
+	FileChunker() = default;
 
 	uint8_t runCallbackPerChunk(
+		std::string_view path,
 		std::function<uint8_t(const std::list<std::string>::iterator it)>
 			&&callback,
 		const size_t chunk_size, const size_t overlap) {
 		if (overlap >= chunk_size)
 			return INVALID_OVERLAP;
 
-		do {
+		std::fstream file_obj(path.data(), std::ios_base::in);
+
+		if (!file_obj.good()) {
+			return READ_FAIL;
+		}
+
+		while (file_obj.good()) {
 			buf_list_.insert(buf_list_.begin(), std::string());
 			auto buf_it = buf_list_.begin();
 			buf_it->resize(chunk_size + overlap);
 
-			try {
-				file_obj_.read(buf_it->data(), buf_it->length());
-			} catch (std::ios_base::failure &f) {
-				return READ_FAIL;
-			}
+			file_obj.read(buf_it->data(), buf_it->length());
+
 			if (callback(buf_it) != READ_NEXT)
 				break;
-			if (file_obj_.eof())
+
+			if (file_obj.eof()) {
 				break;
-			file_obj_.seekg(-overlap, std::ios_base::cur);
-		} while (file_obj_.gcount());
+			} else if (!file_obj.good()) {
+				return READ_FAIL;
+			}
+
+			file_obj.seekg(-overlap, std::ios_base::cur);
+		}
 
 		return OK;
 	}
 
-	explicit operator bool() const { return file_obj_.good(); }
-
-	bool isReadable() { return file_obj_.good(); }
 	void eraseBuf(const std::list<std::string>::iterator it) {
 		buf_list_.erase(it);
 	}
 
+	void clearBufList() { buf_list_.clear(); }
+
   private:
-	std::ifstream file_obj_;
 	std::list<std::string> buf_list_;
 };
 } // namespace util
@@ -333,18 +342,16 @@ struct Pos {
 class SE {
   public:
 	inline int threadedSearchFile(
-		const std::filesystem::path &path, const std::string_view pattern,
+		const std::string_view path, const std::string_view pattern,
 		const std::function<void(Pos &&pos)> &callback,
 		unsigned int cnt_threads, size_t chunk_size, int num_chars = 256) {
-		util::FileChunker reader{path};
-		if (!reader.isReadable())
-			return READ_FAIL;
-
 		auto workers = util::BlockingThreadPool::makeSharedPtrTo(cnt_threads);
 		if (!workers)
 			return SYS_ERR;
 
+		util::FileChunker reader;
 		int status = reader.runCallbackPerChunk(
+			path,
 			[pattern, &callback, num_chars, cnt_threads, workers, &reader,
 			 this](
 				const std::list<std::string>::iterator buf_it) mutable -> int {
@@ -362,20 +369,20 @@ class SE {
 		return status;
 	}
 
-	inline int searchFile(const std::filesystem::path &path,
+	inline int searchFile(const std::string_view path,
 						  const std::string_view pattern,
 						  const std::function<void(Pos &&pos)> &callback,
 						  size_t chunk_size, int nchars = 256) {
-		util::FileChunker reader{path};
-		if (!reader.isReadable())
-			return READ_FAIL;
-
-		return reader.runCallbackPerChunk(
+		util::FileChunker reader;
+		uint8_t status = reader.runCallbackPerChunk(
+			path,
 			[&](const std::list<std::string>::iterator buf) -> int {
 				searchText(buf->begin(), buf->end(), pattern, callback, nchars);
+		reader.clearBufList();
 				return READ_NEXT;
 			},
 			chunk_size, pattern.length() - 1);
+		return status;
 	}
 
 	inline int threadedSearchText(
