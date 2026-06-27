@@ -44,6 +44,18 @@ TEST(ssearch_test, threadedSearchText) {
 	ASSERT_EQ(cnt >= 2, true);
 }
 
+
+TEST(ssearch_test, threadedSearchFile) {
+	ssearch::SE search;
+	std::atomic<int32_t> cnt = 0;
+	ASSERT_EQ(search.threadedSearchFile(
+				  "../100mb-example-file.txt", "example",
+				  [&cnt](ssearch::Pos &&pos) { ++cnt; }, 20, 2 * MB),
+			  OK);
+	ASSERT_EQ(cnt >= 4'369'066, true);
+	std::cerr << "cnt = " << cnt << '\n';
+}
+
 TEST(ssearch_test, searchFile) {
 	ssearch::SE search;
 	int32_t cnt = 0;
@@ -56,13 +68,3 @@ TEST(ssearch_test, searchFile) {
 	std::cerr << "cnt = " << cnt << '\n';
 }
 
-TEST(ssearch_test, threadedSearchFile) {
-	ssearch::SE search;
-	std::atomic<int32_t> cnt = 0;
-	ASSERT_EQ(search.threadedSearchFile(
-				  "../100mb-example-file.txt", "example",
-				  [&cnt](ssearch::Pos &&pos) { ++cnt; }, 8, 2 * MB),
-			  OK);
-	ASSERT_EQ(cnt >= 4'369'066, true);
-	std::cerr << "cnt = " << cnt << '\n';
-}

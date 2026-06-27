@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <ios>
@@ -21,6 +20,7 @@
 namespace util {
 #define SYS_ERR -1
 #define OK 0
+#define DEBUG(str) std::cerr << "[DEBUG] " << str;
 class BlockingThreadPool {
   public:
 	BlockingThreadPool() = default;
@@ -39,13 +39,13 @@ class BlockingThreadPool {
 
 					while (true) {
 						std::unique_lock<std::mutex> task_q_lock(task_q_mtx_);
-						cv_.wait(task_q_lock, [this]() {
+						task_available_.wait(task_q_lock, [this]() {
 							return kill_all_threads_ || !task_q_.empty();
 						});
 
 						if (kill_all_threads_) {
 							active_thread_cnt_.fetch_sub(1);
-							cv_.notify_all();
+							alive_threads_.notify_all();
 							return;
 						} else {
 							task = std::move(task_q_.front());
@@ -57,7 +57,7 @@ class BlockingThreadPool {
 							task();
 
 							working_threads_cnt_.fetch_sub(1);
-							cv_.notify_all();
+							ongoing_work_.notify_all();
 						}
 					}
 				}));
@@ -80,7 +80,7 @@ class BlockingThreadPool {
 				task_q_.push(fn);
 		}
 
-		cv_.notify_one();
+		task_available_.notify_one();
 	}
 
 	static inline std::shared_ptr<BlockingThreadPool>
@@ -100,22 +100,32 @@ class BlockingThreadPool {
 
 	inline void waitForTasksComplete() {
 		std::unique_lock<std::mutex> take(task_q_mtx_);
-		cv_.wait(take, [this]() {
+		ongoing_work_.wait(take, [this]() {
+			// DEBUG("waitForTasksComplete(): checking. working_threads_cnt_ = " << working_threads_cnt_
+			// 																  << " queue size: " << task_q_.size() << '\n');
 			return working_threads_cnt_ == 0 && task_q_.size() == 0;
 		});
+
+		// DEBUG("waitForTasksComplete(): queue emptied and working threads = 0\n")
 	}
 
 	inline int waitForTasksCompleteAndHarvestThreads() {
 		try {
 			std::unique_lock<std::mutex> task_q_lock(task_q_mtx_);
-			cv_.wait(task_q_lock, [this]() {
-				return working_threads_cnt_.load() == 0 && task_q_.size() == 0;
+
+			DEBUG("waitForTasksCompleteAndHarvestThreads(): waiting for working_thread_cnt_ and task_q.size()\n");
+			ongoing_work_.wait(task_q_lock, [this]() {
+				return working_threads_cnt_ == 0 && task_q_.size() == 0;
 			});
 
-			kill_all_threads_.store(true);
-			cv_.notify_all();
+			DEBUG("waitForTasksCompleteAndHarvestThreads(): working threads = 0, task q empty.\n");
 
-			cv_.wait(task_q_lock, [this] { return active_thread_cnt_ == 0; });
+			kill_all_threads_.store(true);
+			task_available_.notify_all();
+
+			alive_threads_.wait(task_q_lock, [this] { return active_thread_cnt_ == 0; });
+
+			DEBUG("waitForTasksCompleteAndHarvestThreads(): active_thread_cnt = 0\n");
 
 			for (auto &worker : threads_vec_) {
 				if (worker.joinable()) {
@@ -138,23 +148,18 @@ class BlockingThreadPool {
 			std::unique_lock<std::mutex> task_q_lock(task_q_mtx_);
 
 			kill_all_threads_.store(true);
-			cv_.notify_all();
+			task_available_.notify_all();
 
-			cv_.wait(task_q_lock, [this] { return active_thread_cnt_ == 0; });
-			// DEBUG("forceterminateThreads(): wait completed, " <<
-			// active_thread_cnt_ << " active threads.\n must join " <<
-			// threads_vec_.size() << " threads.\n");
+			alive_threads_.wait(task_q_lock, [this] { return active_thread_cnt_ == 0; });
+			// DEBUG("forceterminateThreads(): wait completed, " << active_thread_cnt_ << " active threads.\n must join " << threads_vec_.size() << " threads.\n");
 
 			for (auto &worker : threads_vec_) {
 				if (worker.joinable()) {
-					// DEBUG("forceterminateThreads(): " << "joining a
-					// thread.\n");
+					// DEBUG("forceterminateThreads(): " << "joining a thread.\n");
 					worker.join();
 					joinable_thread_cnt_.fetch_sub(1);
-					// DEBUG("forceterminateThreads(): " << joinable_thread_cnt_
-					// << " threads remaining to join.\n");
-				} // else DEBUG("forceterminateThreads(): " << "encountered an
-				  // unjoinable thread.\n");
+					// DEBUG("forceterminateThreads(): " << joinable_thread_cnt_ << " threads remaining to join.\n");
+				} // else DEBUG("forceterminateThreads(): " << "encountered an unjoinable thread.\n");
 			}
 			threads_vec_.clear();
 			// DEBUG("forceterminateThreads(): threads harvested\n");
@@ -191,6 +196,9 @@ class BlockingThreadPool {
   private:
 	std::mutex task_q_mtx_;
 	std::condition_variable cv_;
+	std::condition_variable task_available_;
+	std::condition_variable ongoing_work_;
+	std::condition_variable alive_threads_;
 	std::queue<std::function<void()>> task_q_;
 	std::vector<std::thread> threads_vec_;
 	std::atomic<bool> kill_all_threads_ = false;
@@ -389,7 +397,7 @@ class SE {
 		const std::string::const_iterator begin,
 		std::string::const_iterator end, const std::string_view pattern,
 		const std::function<void(Pos &&pos)> &callback,
-		unsigned int cnt_threads, size_t part_size,
+		unsigned int cnt_threads, size_t partition,
 		std::shared_ptr<util::BlockingThreadPool> thread_pool = NULL,
 		int num_chars = 256) {
 		std::atomic<size_t> cnt = 0;
@@ -406,8 +414,8 @@ class SE {
 
 		for (std::string::const_iterator
 				 first = begin,
-				 second = std::min(end, begin + part_size + overlap);
-			 second <= end; first += part_size, second += part_size + overlap) {
+				 second = std::min(end, begin + partition + overlap);
+			 second <= end; first += partition, second += partition + overlap) {
 			workers->pushTask([&, first, second]() {
 				cnt.fetch_add(
 					searchText(first, second, pattern, callback, num_chars));
